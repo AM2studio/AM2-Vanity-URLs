@@ -4,54 +4,147 @@ Plugin Name: AM2 Vanity URLs
 Plugin URI: http://am2studio.hr
 Description: AM2 studio vanity URLs
 Author: AM2 studio
-Version: 1.1
+Version: 1.2
 Author URI: http://www.am2studio.hr
 */
 
-// Create custom post status for pages
-function am2_custom_status_register(){
+/*
+2015-09-08: Fix bug with custom URLs
+2015-09-11: Full rewrite! Using add_
+*/
+function am2_redirect_empty_page(){
+	if(is_404()){
+        $paged = get_query_var('paged');
+        if(!empty($paged) && $paged > 1){
+            $uri = $_SERVER['REQUEST_URI'];
+            $has_page_pos = strpos($uri,'page');
+            $final = substr($uri,0,$has_page_pos);
+            $link = get_bloginfo('url').$final;
+            wp_redirect($link, '302'); //-> OVO RIJEŠITI$target_id->post_id);
+        }
+    }
+	$vanity_urls = get_option('am2_vanity_urls');
+		$uri = $_SERVER['REQUEST_URI'];
+		
+	foreach($vanity_urls as $vanity):
+		$construct_check_uri = '/'.$vanity['context'].'/'.$vanity['original_slug'].'/';
+		if($uri == $construct_check_uri){
+			$link = site_url().'/'.$vanity['url'].'/';;
+			wp_redirect($link, '302');
+		}
+		
+	endforeach;
 	
-	register_post_status( 'vanity', array(
-		'label'                     => _x( 'Vanity', 'page' ),
-		'public'                    => true,
-		'exclude_from_search'       => false,
-		'show_in_admin_all_list'    => true,
-		'show_in_admin_status_list' => true,
-		'label_count'               => _n_noop( 'Vanity <span class="count">(%s)</span>', 'Vanity <span class="count">(%s)</span>' ),
-	) );
-
 }
-add_action( 'init', 'am2_custom_status_register' );
+add_action('template_redirect', 'am2_redirect_empty_page');
 
-// Add custom post status to Quick Edit dropdown
-function am2_status_into_inline_edit() { // ultra-simple example
-	echo "<script>
-	jQuery(document).ready( function() {
-		jQuery( 'select[name=\"_status\"]' ).append( '<option value=\"vanity\">Vanity</option>' );
-	});
-	</script>";
+function am2_on_update_vanity($object_id, $am2_vanity_url, $object_context = 'post'){
+	
+	/*
+	Structure:
+	[url] 			= url of the vanity URL
+	[original_slug] = url of the original post/taxonomy
+	[context]		= post/page/category/any type or taxonomy
+	[context_id] 	= context id
+	*/
+	
+	if(empty($object_id)) return;
+	
+	$vanity_urls = array();
+	$vanity_urls = get_option('am2_vanity_urls');
+	
+	if(empty($am2_vanity_url)){
+		if(!empty($vanity_urls[$object_context.'_'.$object_id])){
+			//if it's deleted we need to unset it and flush rewrite rules.
+			unset($vanity_urls[$object_context.'_'.$object_id]);
+			update_option('am2_vanity_urls',$vanity_urls);
+			flush_rewrite_rules();
+			
+			return;
+		}
+	}
+	
+	if(!empty($am2_vanity_url)){
+
+
+		$am2_vanity_url = ltrim($am2_vanity_url,'/');
+		$am2_vanity_url = rtrim($am2_vanity_url,'/');
+		
+		$vanity_urls[$object_context.'_'.$object_id]['url'] = $am2_vanity_url;
+		
+		$original_slug = '';
+		$post_types = get_post_types();
+		if(in_array($object_context, $post_types)){
+			$object = get_post($object_id); 
+			$original_slug = $object->post_name;
+		}
+		
+		$taxonomies = get_taxonomies();
+		if(in_array($object_context, $taxonomies)){
+			
+			$object = get_term_by('id', $object_id, $object_context); 
+			$original_slug = $object->slug;
+		}
+		
+		$vanity_urls[$object_context.'_'.$object_id]['original_slug'] = $original_slug;
+		$vanity_urls[$object_context.'_'.$object_id]['context'] = $object_context;
+		$vanity_urls[$object_context.'_'.$object_id]['context_id'] = $object_id;
+		
+		update_option('am2_vanity_urls',$vanity_urls);
+		
+		am2_generate_rewrite_rules();		
+		flush_rewrite_rules();
+	}
+	
 }
-add_action('admin_footer-edit.php','am2_status_into_inline_edit');
+
+function am2_generate_rewrite_rules(){
+	$vanity_urls = get_option('am2_vanity_urls');
+	//cleanup context = revision 
+	foreach($vanity_urls as $key => $vanity):
+		if($vanity['context'] == 'revision'){
+			unset($vanity_urls[$key]);
+		}
+	endforeach;
+	update_option('am2_vanity_urls',$vanity_urls);
+	
+	$post_types = get_post_types();
+	$args = array(); 
+	$output = 'objects'; // or objects
+	$taxonomies = get_taxonomies( $args, $output );
+	foreach($vanity_urls as $vanity):
+		if(in_array($vanity['context'], $post_types)){
+			// It's a post type
+			add_rewrite_rule($vanity['url'].'/?$', 'index.php?'.$vanity['context'].'='.$vanity['original_slug'], 'top');
+		}	
+		if(!empty($taxonomies[$vanity['context']])){ //$taxonomies['category']
+				add_rewrite_rule($vanity['url'].'/?$', 'index.php?'.$taxonomies[$vanity['context']]->query_var.'='.$vanity['original_slug'], 'top');
+				add_rewrite_rule($vanity['url'].'/page/?([0-9]{1,})/?$', 'index.php?'.$taxonomies[$vanity['context']]->query_var.'='.$vanity['original_slug'].'&paged=$matches[1]', 'top');				
+		}
+	endforeach;	
+}
+
+function am2_add_rewrite_rules_to_init() { 
+    am2_generate_rewrite_rules();
+}
+add_action( 'init', 'am2_add_rewrite_rules_to_init' );
+
 
 // create custom plugin settings menu
-add_action('admin_menu', 'am2_vanity_create_menu');
 
 function am2_vanity_create_menu() {
-
 	//create new top-level menu
 	//add_submenu_page( $parent_slug, $page_title, $menu_title, $capability, $menu_slug, $function );
 	add_submenu_page('options-general.php','Vanity URL Settings', 'Vanity URL Settings', 'administrator', 'am2-vanity-settings-page', 'am2_vanity_settings_page' );
-
 	//call register settings function
 	add_action( 'admin_init', 'register_am2_vanity_settings' );
 }
-
+add_action('admin_menu', 'am2_vanity_create_menu');
 
 function register_am2_vanity_settings() {
 	//register our settings
 	register_setting( 'am2-vanity-plugin-settings-group', 'vanity_available_post_types' );
-	//register_setting( 'am2-vanity-plugin-settings-group', 'some_other_option' );
-	//register_setting( 'am2-vanity-plugin-settings-group', 'option_etc' );
+	register_setting( 'am2-vanity-plugin-settings-group', 'vanity_available_taxonomies' );
 }
 
 function am2_vanity_settings_page() {
@@ -71,6 +164,27 @@ function am2_vanity_settings_page() {
 		foreach($available_post_types as $type):
 			?>
             	<label><input type="checkbox" name="vanity_available_post_types[]" value="<?php echo $type->name; ?>"<?php if(in_array($type->name,$vanity_available_post_types)) { ?> checked="checked"<?php } ?>  /> <?php echo $type->label; ?></label><br />
+			<?php
+		endforeach;
+		?>
+        </td>
+        </tr>
+    </table>
+    <?php 
+	$taxonomies = get_taxonomies(); 
+	unset($taxonomies['nav_menu']);
+	unset($taxonomies['link_category']);
+	unset($taxonomies['post_format']);
+	?>
+    <table class="form-table">
+        <tr valign="top">
+        <th scope="row">Use Vanity URLs for these taxonomies</th>
+        <td>
+        <?php $vanity_available_post_types = get_option('vanity_available_taxonomies');
+		$available_taxonomies = $taxonomies;
+		foreach($available_taxonomies as $key => $value):
+			?>
+            	<label><input type="checkbox" name="vanity_available_taxonomies[]" value="<?php echo $key; ?>"<?php if(in_array($key,$vanity_available_post_types)) { ?> checked="checked"<?php } ?>  /> <?php echo $value; ?></label><br />
 			<?php
 		endforeach;
 		?>
@@ -116,174 +230,101 @@ function am2_vanity_meta_box_callback( $post ) {
 	// Add a nonce field so we can check for it later.
 	wp_nonce_field( 'am2_vanity_meta_box', 'am2_vanity_meta_box_nonce' );
 
-	/*
-	 * Use get_post_meta() to retrieve an existing value
-	 * from the database and use the value for the form.
-	 */
-	$value = get_post_meta( $post->ID, '_am2_vanity_url', true );
-
+	$value = '';
+	$vanity_urls = get_option('am2_vanity_urls');
+	if(!empty($vanity_urls[$post->post_type."_".$post->ID]['url'])){
+		$value = $vanity_urls[$post->post_type."_".$post->ID]['url'];
+	}
+	
 	echo '<label for="am2_vanity_url">';
 	_e( 'Vanity URL', 'myplugin_textdomain' );
 	echo '</label>';
-	echo '<input type="text" id="am2_vanity_url" name="am2_vanity_url" value="' . esc_attr( $value ) . '" size="25" />';
+	echo site_url().'/<br><input type="text" id="am2_vanity_url" name="am2_vanity_url" value="' . esc_attr( $value ) . '" size="25" />';
 }
 
-/**
- * When the post is saved, saves our custom data.
- *
- * @param int $post_id The ID of the post being saved.
- */
 function am2_vanity_save_meta_box_data( $post_id ) {
-
-	/*
-	 * We need to verify this came from our screen and with proper authorization,
-	 * because the save_post action can be triggered at other times.
-	 */
-
 	// Check if our nonce is set.
-	if ( ! isset( $_POST['am2_vanity_meta_box_nonce'] ) ) {
-		return;
-	}
-
+	if ( ! isset( $_POST['am2_vanity_meta_box_nonce'] ) ) return;
 	// Verify that the nonce is valid.
-	if ( ! wp_verify_nonce( $_POST['am2_vanity_meta_box_nonce'], 'am2_vanity_meta_box' ) ) {
-		return;
-	}
-
+	if ( ! wp_verify_nonce( $_POST['am2_vanity_meta_box_nonce'], 'am2_vanity_meta_box' ) ) return;
 	// If this is an autosave, our form has not been submitted, so we don't want to do anything.
-	if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
-		return;
-	}
+	if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
 
 	// Check the user's permissions.
 	if ( isset( $_POST['post_type'] ) && 'page' == $_POST['post_type'] ) {
-
 		if ( ! current_user_can( 'edit_page', $post_id ) ) {
 			return;
 		}
-
 	} else {
-
 		if ( ! current_user_can( 'edit_post', $post_id ) ) {
 			return;
 		}
 	}
-
-	/* OK, it's safe for us to save the data now. */
-	
-	// Make sure that it is set.
-	if ( ! isset( $_POST['am2_vanity_url'] ) ) {
-		return;
-	}
-
 	// Sanitize user input.
-	$am2_vanity_url = sanitize_title( $_POST['am2_vanity_url'] );
+	//$am2_vanity_url = sanitize_url( $_POST['am2_vanity_url'] );
+	$am2_vanity_url = $_POST['am2_vanity_url'];
 	unset($_POST['am2_vanity_url']);
 	
+	$post_type = get_post_type($post_id);
+	if($post_type == 'revision') continue;
 	// Handle Vanity Pages
-	am2_on_update_vanity($post_id, $am2_vanity_url);
-
-	
+	am2_on_update_vanity($post_id, $am2_vanity_url, $post_type);	
 }
 add_action( 'save_post', 'am2_vanity_save_meta_box_data' );
 
-function am2_on_update_vanity($post_id, $am2_vanity_url){
-	
-	if(empty($post_id)) 		return;
-	
-	// If deleting Vanity URL
-	if(empty($am2_vanity_url)){
-		$previous_vanity_url = get_post_meta( $post_id, '_am2_vanity_url', true );
-		if(!empty($previous_vanity_url)){
-			$args = array( 'post_type' => 'page', 'post_status' => 'vanity', 'pagename' => $previous_vanity_url, 'meta_query' => array(array('key' => 'vanity_id', 'value' => $post_id)) );
-			$vanity_pages = get_posts($args);
-			wp_delete_post( $vanity_pages[0]->ID, true );
-			
-			delete_post_meta( $post_id, '_am2_vanity_url');
-			
-			return;
-		}
-	}
-	
-	//First, check what was the previous vanity URL and delete it if it's not this one
-	$previous_vanity_url = get_post_meta( $post_id, '_am2_vanity_url', true ); 
-	
-	if($previous_vanity_url != $am2_vanity_url){
-	
-		$args = array( 'post_type' => 'page', 'post_status' => 'vanity', 'pagename' => $previous_vanity_url, 'meta_query' => array(array('key' => 'vanity_id', 'value' => $post_id)) );
-		$vanity_pages = get_posts($args); 
-		if(!empty($vanity_pages) && count($vanity_pages) == 1) {
-			wp_delete_post( $vanity_pages[0]->ID, true );
-		}
-		
-	}
-
-	
-	// Now, check if there is already existing Vanity Page or create the new one 
-	$args = array( 'post_type' => 'page', 'post_status' => 'vanity', 'pagename' => $am2_vanity_url, 'meta_query' => array(array('key' => 'vanity_id', 'value' => $post_id)) );
-	$vanity_pages = get_posts($args);
-	if(!empty($vanity_pages)) {
-		$final_vanity_url = $vanity_pages[0]->post_name;
-	} else {
-		$args = array( 
-			'post_type' 	=> 'page', 
-			'post_status' 	=> 'vanity', 
-			'post_name' 	=> $am2_vanity_url,
-			'post_title'	=> $am2_vanity_url
-		);
-		$new_vanity_page_id = wp_insert_post($args);
-		$new_vanity_page = get_post($new_vanity_page_id);
-		
-		update_post_meta($new_vanity_page_id, 'vanity_id', $post_id);
-		$final_vanity_url = $new_vanity_page->post_name;
-	}
-
-	
-	// Finally - Save meta field
-	update_post_meta( $post_id, '_am2_vanity_url', $final_vanity_url );
-}
-
-function am2_display_vanity_content()
-{
-
-    if ('page' === get_post_type() && 'vanity' === get_post_status() && is_page() && !is_admin()) {
-        //return print "Yo World!";
-		global $post;
-		
-		
-		$vanity_id = get_post_meta($post->ID, 'vanity_id', true); 
-		if(empty($vanity_id)) die;
-		
-		remove_filter('post_link', 'am2_append_query_string'); // We need to remove filters because otherwise we will not get the real URL
-		remove_filter('post_type_link', 'am2_append_query_string');
-		$vanity_permalink = get_permalink($vanity_id);
-		add_filter( 'post_link', 'am2_append_query_string', 10, 3 );
-		add_filter( 'post_type_link', 'am2_append_query_string', 10, 3 );
-		
-		
-		$response = wp_remote_get( $vanity_permalink );
-if( is_array($response) ) {
-  $header = $response['headers']; // array of http header lines
-  $body = $response['body']; // use the content
-}
-		echo $body;
-		die;
-	}
-}
-add_action( 'wp', 'am2_display_vanity_content' );
 
 // Change permalinks to Vanity for get_permalink() and the_permalink()
 function am2_append_query_string( $url, $post, $leavename ) {
 	
-	$vanity_available_post_types = get_option('vanity_available_post_types'); 
-
-		if ( in_array($post->post_type, $vanity_available_post_types) ) { 
-			if(!empty($post->_am2_vanity_url)){
-				return get_bloginfo('home').'/'.$post->_am2_vanity_url; 
-			}
-		}
-		return $url;
+	
+	$vanity_urls = get_option('am2_vanity_urls'); 
+	if(!empty($vanity_urls[$post->post_type."_".$post->ID]['url'])){
+		$url = site_url().'/'.$vanity_urls[$post->post_type."_".$post->ID]['url'];
+	}
+    return $url; 
 	
 }
 add_filter( 'post_link', 'am2_append_query_string', 10, 3 );
 add_filter( 'post_type_link', 'am2_append_query_string', 10, 3 );
+
+
+function am2_vanity_term_link_filter( $url, $term, $taxonomy ) {
+	$vanity_urls = get_option('am2_vanity_urls'); 
+	if(!empty($vanity_urls[$taxonomy."_".$term->term_id]['url'])){
+		$url = site_url().'/'.$vanity_urls[$taxonomy."_".$term->term_id]['url'];
+	}
+    return $url;  
+}
+add_filter('term_link', 'am2_vanity_term_link_filter', 10, 3);
+
+// 2015-09-08: Added fields to category pages
+
+function am2_vanity_add_taxonomy_fields( $term ) {    //check for existing featured ID
+    $t_id = $term->term_id;
+    $vanity_urls = get_option('am2_vanity_urls');
+	$value = '';
+	if(!empty($vanity_urls[$_REQUEST['taxonomy']."_".$term->term_id]['url'])){
+		$value = $vanity_urls[$_REQUEST['taxonomy']."_".$term->term_id]['url'];
+	}
+?>
+<tr class="form-field">
+	<th scope="row" valign="top"><label for="_am2_vanity_url"><?php _e('Vanity URL'); ?></label></th>
+	<td>
+    	<?php echo site_url().'/'; ?>
+		<input type="hidden" name="_am2_vanity_term_name" value="<?php echo $_REQUEST['taxonomy']; ?>" />
+        <input type="text" name="_am2_vanity_url" id="_am2_vanity_url" placeholder="any-url" size="3" style="width:60%;" value="<?php echo $value; ?>"><br />
+        <span class="description"><?php _e('This URL will replace the dafault category URL with new one.'); ?></span>
+    </td>
+</tr>
+<?php
+}
+function am2_vanity_save_taxonomy( $term_id ) {
+	am2_on_update_vanity($term_id, $_POST['_am2_vanity_url'], $object_context = $_POST['_am2_vanity_term_name']);
+}
+
+$available_taxonomies = get_option('vanity_available_taxonomies');
+foreach($available_taxonomies as $key => $value):
+	add_action ( 'create_'.$value, 'am2_vanity_save_taxonomy', 10, 2 );
+	add_action ( 'edited_'.$value, 'am2_vanity_save_taxonomy', 10, 2 );
+	add_action ( 'edit_'.$value.'_form_fields', 'am2_vanity_add_taxonomy_fields' );
+endforeach;
